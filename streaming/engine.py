@@ -45,6 +45,17 @@ def _ping() -> str:
     return "event: ping\ndata: {\"type\": \"ping\"}\n\n"
 
 
+# Number of hex characters to use when building a message ID from a request_id.
+# A UUID has 32 hex chars after stripping hyphens; we use the first 24 to keep
+# IDs short while still being unique within the scope of a single request.
+_MSG_ID_HEX_LEN = 24
+
+
+def _msg_id_from_request_id(request_id: str) -> str:
+    """Derive a deterministic ``msg_<hex>`` ID from a UUID request_id."""
+    return f"msg_{request_id.replace('-', '')[:_MSG_ID_HEX_LEN]}"
+
+
 # ---------------------------------------------------------------------------
 # Anthropic-native stream (Ollama)
 # ---------------------------------------------------------------------------
@@ -93,8 +104,7 @@ async def stream_anthropic_passthrough(
             if event_type == "message_start":
                 msg = payload.get("message", {})
                 msg["model"] = requested_model
-                # Use first 24 hex chars of the UUID (always 32 hex chars after removing hyphens)
-                msg.setdefault("id", f"msg_{request_id.replace('-', '')[:24]}")
+                msg.setdefault("id", _msg_id_from_request_id(request_id))
                 payload["message"] = msg
                 message_start_sent = True
 
@@ -125,7 +135,7 @@ async def stream_openai_to_anthropic(
       data: {"id": "...", "choices": [{"delta": {"role"?: "assistant", "content"?: "..."}, "finish_reason": null|"stop"}], ...}
     """
     # Use first 24 hex chars of the UUID (always 32 hex chars after removing hyphens)
-    msg_id = f"msg_{request_id.replace('-', '')[:24]}"
+    msg_id = _msg_id_from_request_id(request_id)
     block_index = 0
     output_tokens = 0
     stop_reason = "end_turn"
