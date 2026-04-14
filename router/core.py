@@ -20,6 +20,7 @@ Concurrency control lives in main.py (semaphore + queue).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, AsyncIterator, Dict, Optional
@@ -135,7 +136,8 @@ class RouterCore:
         estimated_input: int,
     ) -> Dict[str, Any]:
         """Attempt the request, retrying with the alternate provider on failure."""
-        last_error: Optional[str] = None
+        # last_error is only used for logging — never returned to the client directly
+        last_log_error: Optional[str] = None
 
         while True:
             # Guard: stop if all retry budget is exhausted
@@ -161,7 +163,7 @@ class RouterCore:
                 )
                 state.mark_provider_used(provider)
                 state.record_failure(f"{provider} rate-limited")
-                last_error = f"{provider} rate-limited"
+                last_log_error = f"{provider} rate-limited"
                 await metrics.record_retry()
                 continue
 
@@ -184,6 +186,7 @@ class RouterCore:
                 )):
                     logger.warning("[%s] Empty response from %s, retrying", state.request_id, provider)
                     state.record_failure(f"{provider} returned empty content")
+                    last_log_error = f"{provider} empty response"
                     await metrics.record_retry()
                     if not state.can_retry(config.router.max_retries):
                         # Return the (possibly empty) normalised response
@@ -198,27 +201,29 @@ class RouterCore:
                 logger.warning("[%s] Rate limit on %s: %s", state.request_id, provider, exc)
                 if provider == "nvidia":
                     _set_rate_limited("nvidia", config.nvidia.rate_limit_cooldown)
-                state.record_failure(str(exc))
-                last_error = str(exc)
+                state.record_failure("rate_limit")
+                last_log_error = f"{provider} rate limit"
                 await metrics.record_retry()
 
             except (AdapterTimeout, AdapterError) as exc:
                 logger.warning("[%s] Error on %s: %s", state.request_id, provider, exc)
-                state.record_failure(str(exc))
-                last_error = str(exc)
-                if not exc.retryable:
+                retryable = getattr(exc, "retryable", True)
+                state.record_failure("provider_error")
+                last_log_error = f"{provider} error"
+                if not retryable:
                     break
                 await metrics.record_retry()
 
-            except Exception as exc:
+            except Exception:
                 logger.exception("[%s] Unexpected error on %s", state.request_id, provider)
-                state.record_failure("internal error")
-                last_error = "internal error"
+                state.record_failure("internal_error")
+                last_log_error = "internal error"
                 await metrics.record_retry()
 
-        # All retries exhausted — return Anthropic-format error
+        # All retries exhausted — return Anthropic-format error (no exception strings)
+        logger.error("[%s] Returning error to client. last=%s", state.request_id, last_log_error)
         await metrics.record_failure()
-        return api_error(f"All providers failed. Last error: {last_error or 'unknown'}")
+        return api_error("The request could not be completed. All providers failed.")
 
     # ------------------------------------------------------------------
     # Internal: streaming execution with retry logic
@@ -232,7 +237,7 @@ class RouterCore:
         estimated_input: int,
     ) -> AsyncIterator[str]:
         """Attempt the streaming request, retrying on failure."""
-        last_error: Optional[str] = None
+        last_log_error: Optional[str] = None
 
         while True:
             # Guard: stop if all retry budget is exhausted
@@ -250,7 +255,7 @@ class RouterCore:
                 logger.info("[%s] Stream: provider %s rate-limited, skipping", state.request_id, provider)
                 state.mark_provider_used(provider)
                 state.record_failure(f"{provider} rate-limited")
-                last_error = f"{provider} rate-limited"
+                last_log_error = f"{provider} rate-limited"
                 await metrics.record_retry()
                 continue
 
@@ -281,26 +286,27 @@ class RouterCore:
                 logger.warning("[%s] Stream rate limit on %s: %s", state.request_id, provider, exc)
                 if provider == "nvidia":
                     _set_rate_limited("nvidia", config.nvidia.rate_limit_cooldown)
-                state.record_failure(str(exc))
-                last_error = str(exc)
+                state.record_failure("rate_limit")
+                last_log_error = f"{provider} rate limit"
                 await metrics.record_retry()
 
             except (AdapterTimeout, AdapterError) as exc:
                 logger.warning("[%s] Stream error on %s: %s", state.request_id, provider, exc)
-                state.record_failure(str(exc))
-                last_error = str(exc)
-                if not exc.retryable:
+                retryable = getattr(exc, "retryable", True)
+                state.record_failure("provider_error")
+                last_log_error = f"{provider} error"
+                if not retryable:
                     break
                 await metrics.record_retry()
 
-            except Exception as exc:
+            except Exception:
                 logger.exception("[%s] Stream unexpected error on %s", state.request_id, provider)
-                state.record_failure("internal error")
-                last_error = "internal error"
+                state.record_failure("internal_error")
+                last_log_error = "internal error"
                 await metrics.record_retry()
 
-        # All retries exhausted — yield an Anthropic-format error as a final SSE event
+        # All retries exhausted — yield an Anthropic-format error as a final SSE event (no exception strings)
+        logger.error("[%s] Stream: returning error to client. last=%s", state.request_id, last_log_error)
         await metrics.record_failure()
-        import json
-        error_payload = api_error(f"All providers failed. Last error: {last_error or 'unknown'}")
+        error_payload = api_error("The request could not be completed. All providers failed.")
         yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"

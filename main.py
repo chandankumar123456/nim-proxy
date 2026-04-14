@@ -31,7 +31,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Union
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from config import config
 from router.core import RouterCore
@@ -222,11 +222,19 @@ async def messages(request: Request):
 
     try:
         parsed = MessagesRequest.model_validate(raw_body)
-    except Exception as exc:
-        # Use str(exc) only for validation errors (user-visible, no server internals)
-        # Pydantic validation messages are user-friendly and do not expose server internals
-        error_msg = str(exc).split("\n")[0][:500]  # First line, capped at 500 chars
-        return JSONResponse(status_code=400, content=invalid_request(error_msg))
+    except ValidationError as exc:
+        # Extract structured field errors — no raw exception string reaches the response
+        error_parts = [
+            f"{' -> '.join(str(loc) for loc in e['loc'])}: {e['msg']}"
+            for e in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=400,
+            content=invalid_request("Validation failed: " + "; ".join(error_parts[:5])),
+        )
+    except Exception:
+        logger.warning("Unexpected error during request validation", exc_info=True)
+        return JSONResponse(status_code=400, content=invalid_request("Invalid request format"))
 
     # Concurrency control
     acquired = await _acquire_slot()
