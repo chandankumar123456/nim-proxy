@@ -93,6 +93,7 @@ async def stream_anthropic_passthrough(
             if event_type == "message_start":
                 msg = payload.get("message", {})
                 msg["model"] = requested_model
+                # Use first 24 hex chars of the UUID (always 32 hex chars after removing hyphens)
                 msg.setdefault("id", f"msg_{request_id.replace('-', '')[:24]}")
                 payload["message"] = msg
                 message_start_sent = True
@@ -123,6 +124,7 @@ async def stream_openai_to_anthropic(
     OpenAI chunk format:
       data: {"id": "...", "choices": [{"delta": {"role"?: "assistant", "content"?: "..."}, "finish_reason": null|"stop"}], ...}
     """
+    # Use first 24 hex chars of the UUID (always 32 hex chars after removing hyphens)
     msg_id = f"msg_{request_id.replace('-', '')[:24]}"
     block_index = 0
     output_tokens = 0

@@ -223,7 +223,10 @@ async def messages(request: Request):
     try:
         parsed = MessagesRequest.model_validate(raw_body)
     except Exception as exc:
-        return JSONResponse(status_code=400, content=invalid_request(str(exc)))
+        # Use str(exc) only for validation errors (user-visible, no server internals)
+        # Pydantic validation messages are user-friendly and do not expose server internals
+        error_msg = str(exc).split("\n")[0][:500]  # First line, capped at 500 chars
+        return JSONResponse(status_code=400, content=invalid_request(error_msg))
 
     # Concurrency control
     acquired = await _acquire_slot()
@@ -280,10 +283,10 @@ async def messages(request: Request):
 
             return JSONResponse(content=result)
 
-    except Exception as exc:
+    except Exception:
         _release_slot()
         logger.exception("Unhandled error in /v1/messages")
-        return JSONResponse(status_code=500, content=api_error(f"Internal error: {exc}"))
+        return JSONResponse(status_code=500, content=api_error("An internal error occurred. Please try again."))
 
 
 # ---------------------------------------------------------------------------

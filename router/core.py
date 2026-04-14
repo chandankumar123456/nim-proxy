@@ -138,6 +138,14 @@ class RouterCore:
         last_error: Optional[str] = None
 
         while True:
+            # Guard: stop if all retry budget is exhausted
+            if not state.can_retry(config.router.max_retries):
+                logger.error(
+                    "[%s] Exhausted all retries. providers_used=%s failures=%s",
+                    state.request_id, state.providers_used, state.failure_reasons,
+                )
+                break
+
             # Choose provider
             provider = decide_provider(
                 body.get("messages", []),
@@ -145,18 +153,17 @@ class RouterCore:
                 state.providers_used,
             )
 
-            # Skip rate-limited providers
+            # Skip rate-limited providers and loop back to re-evaluate
             if _is_rate_limited(provider):
                 logger.info(
                     "[%s] Provider %s is rate-limited, skipping",
                     state.request_id, provider,
                 )
-                # Mark as tried so routing picks the other provider
                 state.mark_provider_used(provider)
                 state.record_failure(f"{provider} rate-limited")
-
-            if not state.can_retry(config.router.max_retries) and state.retry_count > 0:
-                break
+                last_error = f"{provider} rate-limited"
+                await metrics.record_retry()
+                continue
 
             state.mark_provider_used(provider)
             await metrics.record_provider_use(provider)
@@ -205,17 +212,9 @@ class RouterCore:
 
             except Exception as exc:
                 logger.exception("[%s] Unexpected error on %s", state.request_id, provider)
-                state.record_failure(str(exc))
-                last_error = str(exc)
+                state.record_failure("internal error")
+                last_error = "internal error"
                 await metrics.record_retry()
-
-            # Check if we can still retry
-            if not state.can_retry(config.router.max_retries):
-                logger.error(
-                    "[%s] Exhausted all retries. providers_used=%s failures=%s",
-                    state.request_id, state.providers_used, state.failure_reasons,
-                )
-                break
 
         # All retries exhausted — return Anthropic-format error
         await metrics.record_failure()
@@ -236,19 +235,24 @@ class RouterCore:
         last_error: Optional[str] = None
 
         while True:
+            # Guard: stop if all retry budget is exhausted
+            if not state.can_retry(config.router.max_retries):
+                break
+
             provider = decide_provider(
                 body.get("messages", []),
                 body.get("system"),
                 state.providers_used,
             )
 
+            # Skip rate-limited providers and loop back to re-evaluate
             if _is_rate_limited(provider):
                 logger.info("[%s] Stream: provider %s rate-limited, skipping", state.request_id, provider)
                 state.mark_provider_used(provider)
                 state.record_failure(f"{provider} rate-limited")
-
-            if not state.can_retry(config.router.max_retries) and state.retry_count > 0:
-                break
+                last_error = f"{provider} rate-limited"
+                await metrics.record_retry()
+                continue
 
             state.mark_provider_used(provider)
             await metrics.record_provider_use(provider)
@@ -291,12 +295,9 @@ class RouterCore:
 
             except Exception as exc:
                 logger.exception("[%s] Stream unexpected error on %s", state.request_id, provider)
-                state.record_failure(str(exc))
-                last_error = str(exc)
+                state.record_failure("internal error")
+                last_error = "internal error"
                 await metrics.record_retry()
-
-            if not state.can_retry(config.router.max_retries):
-                break
 
         # All retries exhausted — yield an Anthropic-format error as a final SSE event
         await metrics.record_failure()
